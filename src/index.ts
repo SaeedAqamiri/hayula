@@ -235,7 +235,7 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
       if (lines.join("\n").length > limit) break
     }
     lines.push("")
-    lines.push("Hints, not facts — trust the code over the notebook, re-verify suspect/stale entries. Use `notes_get` at task start and `notes_commit` when a task is done.")
+    lines.push("Hints, not facts — trust the code over the notebook, re-verify suspect/stale entries. Use `notes_get` at task start and `notes_commit` when a task is done. Write every notebook summary in English, even when the conversation is in another language.")
     return lines.join("\n")
   }
 
@@ -345,7 +345,7 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
 
   const notesCommit = tool({
     description:
-      "Write what a task learned into the per-folder notebooks (`.note.yaml`), the way a senior engineer's mental model accumulates. Call this when you finish a task that produced durable understanding — INCLUDING a pure explanation or Q&A (e.g. 'explain this repo', 'why does this bug happen'): explaining the code is real understanding, so offer to save the map, the architecture, and the gotchas you found.\nThree kinds of knowledge:\n- `folder_summaries`: the role of a whole subtree (high-level, abstract — the higher the folder, the more abstract it should be).\n- `entries`: knowledge about ONE file or subdirectory, written as its compact summary. A directory's notebook describes only its IMMEDIATE children — put deep-file knowledge in the notebook of the folder that directly contains it.\n- `relations`: a connection between two files/dirs. These are placed automatically in the notebook of their lowest common ancestor.\nWrite REWRITTEN compact summaries, not additions — read the old summary via notes_get, fold the new understanding into it, and pass the result. Keep summaries to a paragraph. Skip line-level detail; that lives in source code. Requires user approval (shows a diff) — the user may reject; that is fine.",
+      "Write what a task learned into the per-folder notebooks (`.note.yaml`), the way a senior engineer's mental model accumulates. Call this when you finish a task that produced durable understanding — INCLUDING a pure explanation or Q&A (e.g. 'explain this repo', 'why does this bug happen'): explaining the code is real understanding, so offer to save the map, the architecture, and the gotchas you found.\nThree kinds of knowledge:\n- `folder_summaries`: the role of a whole subtree (high-level, abstract — the higher the folder, the more abstract it should be).\n- `entries`: knowledge about ONE file or subdirectory, written as its compact summary. A directory's notebook describes only its IMMEDIATE children — put deep-file knowledge in the notebook of the folder that directly contains it.\n- `relations`: a connection between two files/dirs. These are placed automatically in the notebook of their lowest common ancestor.\nWrite REWRITTEN compact summaries, not additions — read the old summary via notes_get, fold the new understanding into it, and pass the result. Keep summaries to a paragraph. Write every summary in English even if the user wrote in another language. Skip line-level detail; that lives in source code. Requires user approval (shows a diff) — the user may reject; that is fine.",
     args: {
       task: tool.schema.string().describe("The task that produced these learnings (e.g. 'fix-password-reset-bug')."),
       folder_summaries: tool.schema
