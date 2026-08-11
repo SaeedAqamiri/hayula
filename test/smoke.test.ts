@@ -118,6 +118,43 @@ describe("notes plugin (tree memory)", () => {
     expect(auth).not.toContain("Billing customer lookup")
   })
 
+  test("relations whose LCA is the project root land in the root notebook", async () => {
+    const hooks = await plugin()
+    const commit = hooks.tool!["notes_commit"]
+
+    await (commit.execute as any)(
+      {
+        task: "root-rel",
+        relations: [
+          { from: "src/auth/session-store.ts", to: "README.md", description: "Top-level relation whose LCA is the repo root." },
+        ],
+      },
+      context(),
+    )
+
+    const root = await Bun.file(`${TMP}/.note.yaml`).text()
+    expect(root).toContain("src/auth/session-store.ts")
+    expect(root).toContain("README.md")
+    expect(root).toContain("LCA is the repo root")
+    const auth = await Bun.file(`${TMP}/src/auth/.note.yaml`).text()
+    expect(auth).not.toContain("Top-level relation")
+  })
+
+  test("still drops writes that escape the session worktree", async () => {
+    const hooks = await plugin()
+    const commit = hooks.tool!["notes_commit"]
+    const result = await (commit.execute as any)(
+      {
+        task: "escape",
+        entries: [{ path: "/tmp/notes-plugin-outside/a.ts", summary: "should never be written" }],
+      },
+      context(),
+    )
+    expect(result.output).toContain("Nothing changed")
+    const exists = await Bun.file("/tmp/notes-plugin-outside/a.ts").exists()
+    expect(exists).toBe(false)
+  })
+
   test("rewrites an entry summary instead of duplicating", async () => {
     const hooks = await plugin()
     const commit = hooks.tool!["notes_commit"]

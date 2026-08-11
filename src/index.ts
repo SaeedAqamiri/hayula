@@ -451,9 +451,10 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
       const edits: Array<{ abs: string; label: string; notebook: Notebook; changes: string[] }> = []
       for (const [folder, ops] of opsByFolder) {
         const resolvedFolder = normalizeRel(folder)
-        if (path.resolve(worktree, resolvedFolder).startsWith(worktree + path.sep) === false && resolvedFolder !== ".") {
-          continue
-        }
+        // Sandbox: drop writes that would land outside the session worktree.
+        // The project root ("" or ".") is inside the worktree and is allowed.
+        const target = path.resolve(worktree, resolvedFolder)
+        if (target !== worktree && !target.startsWith(worktree + path.sep)) continue
         const notebook = await loadOrEmpty(resolvedFolder)
         const result = applyOps(notebook, ops)
         if (!result.dirty) continue
