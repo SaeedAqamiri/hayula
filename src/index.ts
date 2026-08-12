@@ -21,13 +21,16 @@ import {
   scoreEntry,
   scoreRelation,
   serializeNotebook,
-  unifiedDiff,
 } from "./notebook.ts"
 
 const CACHE_TTL = 30_000
 const INJECTION_LIMIT = 2_500
 const SESSION_CAP = 40
 const NUDGE_COOLDOWN = 10 * 60_000
+const MIN_SUMMARY_CHARS = 40
+const SUBSTANTIVE_TEXT = 160
+const NOTE_LIMIT = 700
+const ATTACH_TOOLS = new Set(["read", "edit", "write", "apply_patch"])
 
 type SessionEvidence = {
   reads: Set<string>
@@ -57,9 +60,62 @@ type RelationInput = {
   confidence?: Confidence
 }
 
+// ---------- commit quality gate ----------
+
+const hasNonLatinScript = (text: string): boolean =>
+  // eslint-disable-next-line no-control-regex
+  /[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF\u0400-\u04FF\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF\u0900-\u097F]./u.test(text)
+
+/** A summary is usable mid-task only if it names concrete symbols, not just describes them in vague prose. */
+const hasConcreteAnchor = (text: string): boolean =>
+  // CamelCase symbol (class/service name), e.g. ProgressiveMemoryService
+  /[A-Z][a-z]+[A-Z][A-Za-z]*/.test(text) ||
+  // snake_case identifier, e.g. create_candidate
+  /[a-z][a-z0-9]*_[a-z0-9]+/.test(text) ||
+  // file/module reference with an extension, e.g. retrieval.py
+  /\.[a-z]{2,4}\b/.test(text) ||
+  // backtick code span or a bare function call
+  /`[^`\n]+`|\b[A-Za-z_][A-Za-z0-9_]*\(\)/.test(text)
+
+function gateProblems(input: {
+  folder_summaries?: FolderInput[]
+  entries?: EntryInput[]
+  relations?: RelationInput[]
+}): string[] {
+  const lines: string[] = []
+  const note = (where: string, issue: string) => lines.push(`- ${where}: ${issue}`)
+  for (const item of input.folder_summaries ?? []) {
+    const s = item.summary?.trim() ?? ""
+    const where = `folder_summaries[${item.path}]`
+    if (!s) note(where, "empty summary")
+    else if (hasNonLatinScript(s)) note(where, "not written in English (a non-Latin script was detected)")
+    else if (s.length < MIN_SUMMARY_CHARS) note(where, `summary is too thin (< ${MIN_SUMMARY_CHARS} chars); fold in the prior folder summary and the concrete role`)
+  }
+  for (const item of input.entries ?? []) {
+    const s = item.summary?.trim() ?? ""
+    const where = `entries[${item.path}]`
+    if (!s) note(where, "empty summary")
+    else if (hasNonLatinScript(s)) note(where, "not written in English (a non-Latin script was detected)")
+    else if (s.length < MIN_SUMMARY_CHARS) note(where, `summary is too thin (< ${MIN_SUMMARY_CHARS} chars); fold in the prior summary and concrete detail`)
+    else if (!hasConcreteAnchor(s)) note(where, "summary is vague — name the concrete symbols (classes/functions/modules) so the note is usable mid-task")
+    if ((item.based_on ?? []).length === 0) note(where, "no based_on files referenced")
+  }
+  for (const item of input.relations ?? []) {
+    const s = item.description?.trim() ?? ""
+    const where = `relations[${item.from} → ${item.to}]`
+    if (!s) note(where, "empty description")
+    else if (hasNonLatinScript(s)) note(where, "not written in English (a non-Latin script was detected)")
+    else if (s.length < MIN_SUMMARY_CHARS) note(where, `description is too thin (< ${MIN_SUMMARY_CHARS} chars); describe the concrete connection`)
+    if (s && !hasConcreteAnchor(s)) note(where, "description is vague — name which functions/classes connect")
+    if ((item.based_on ?? []).length === 0) note(where, "no based_on files referenced")
+  }
+  return lines
+}
+
 export const NotesPlugin: Plugin = async ({ worktree }) => {
   const sessions = new Map<string, SessionEvidence>()
-  const injected = new Set<string>()
+  const injected = new Map<string, string>()
+  const digestCache = new Map<string, { at: number; text: string }>()
   const walkCache = new Map<string, { at: number; paths: string[] }>()
   const textCache = new Map<string, { at: number; notebook: Notebook }>()
   const skeletonCache = new Map<string, { at: number; value: Awaited<ReturnType<typeof buildSkeleton>> }>()
@@ -113,6 +169,7 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
   function invalidateWorktree() {
     walkCache.clear()
     skeletonCache.clear()
+    digestCache.clear()
   }
 
   function sessionEvidence(sessionID: string): SessionEvidence {
@@ -140,15 +197,59 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
     evidence.dirty = true
   }
 
-  function nudgeLine(evidence: SessionEvidence): string | undefined {
+  /** `path`/`pattern` args from directory-indexing tools (grep/glob) narrow an area, not a single file. */
+  function recordArea(sessionID: string, areaPath: string) {
+    const evidence = sessionEvidence(sessionID)
+    const rel = normalizeRel(areaPath)
+    if (rel === "." || rel.startsWith("..") || rel.includes("*")) return
+    const dir = path.posix.dirname(rel)
+    evidence.areas.add(dir !== "." ? dir : "/")
+    evidence.dirty = true
+  }
+
+  async function commitSuggestion(evidence: SessionEvidence): Promise<string | undefined> {
     if (!evidence.dirty || Date.now() - evidence.lastRemind < NUDGE_COOLDOWN) return
+
+    const candidates: string[] = []
+    for (const abs of evidence.reads) {
+      if (candidates.length >= 4) break
+      const rel = relative(abs)
+      if (rel === "." || rel.startsWith("..")) continue
+      const dir = path.posix.dirname(rel)
+      const name = path.posix.basename(rel)
+      try {
+        const nb = await loadOrEmpty(dir)
+        const entry = nb.entries[name]
+        if (entry && (await freshnessOf(entry.based_on)) === "fresh") continue
+        candidates.push(rel)
+      } catch {
+        continue
+      }
+    }
+
     const areas = Array.from(evidence.areas).slice(0, 3).join(", ")
-    return [
+    const files =
+      candidates.length > 0
+        ? `Newly explored but not yet recorded: ${candidates.map((c) => `\`${c}\``).join(", ")}.`
+        : ""
+    const suggestion = [
       "## Save your learnings",
       `You explored ${areas || "the repository"} and have not saved learnings yet.`,
+      files,
       "When you finish the current task — including a pure explanation or Q&A — call `notes_commit` with the durable takeaways.",
+      "Summaries must be English, source-backed, and at least 40 chars (the plugin gates empty/thin/non-English entries).",
       "The user will approve or reject the change (a diff is shown). Only call it when there is something worth remembering.",
-    ].join("\n")
+    ]
+      .filter((line) => line !== "")
+      .join("\n")
+
+    evidence.lastRemind = Date.now()
+    return suggestion
+  }
+
+  /** Turn-aware dirt marking: a substantive reply indicates understanding worth persisting, not just file reads. */
+  function markUnderstanding(sessionID: string, textLength: number) {
+    if (textLength >= SUBSTANTIVE_TEXT) sessionEvidence(sessionID).dirty = true
   }
 
   function badge(freshness: Freshness): string {
@@ -157,6 +258,48 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
 
   async function freshnessOf(basedOn: BasedOn): Promise<Freshness> {
     return itemFreshness(basedOn, worktree)
+  }
+
+  /** Single file path the given tool worked on, or "" when it is not a path-touching tool. */
+  function attachFileRel(args: unknown): string {
+    if (!args || typeof args !== "object") return ""
+    const record = args as Record<string, unknown>
+    if (typeof record.filePath === "string" && record.filePath.trim()) return normalizeRel(record.filePath)
+    if (Array.isArray(record.files)) {
+      for (const file of record.files) {
+        if (!file || typeof file !== "object") continue
+        const item = file as Record<string, unknown>
+        const p = typeof item.filePath === "string" ? item.filePath : item.relativePath
+        if (typeof p === "string" && p.trim()) return normalizeRel(p)
+      }
+    }
+    return ""
+  }
+
+  /** Leaf note for a file, surfaced at the moment the agent first works on it. */
+  async function buildAttachNote(rel: string): Promise<string> {
+    if (rel === "." || rel.startsWith("..")) return ""
+    const folder = path.posix.dirname(rel)
+    const name = path.posix.basename(rel)
+    try {
+      const nb = await loadOrEmpty(folder)
+      const entry = nb.entries[name]
+      if (!entry) return ""
+      const freshness = await freshnessOf(entry.based_on)
+      const confidence = entry.confidence === "observed" ? "" : ` · ${entry.confidence}`
+      return (
+        `## Local notebook · ${rel} [${badge(freshness)}]${confidence}\n` +
+        `${entry.summary}\n\n` +
+        "_Memory is a hint, not ground truth — trust the file you are working on over this note._"
+      ).slice(0, NOTE_LIMIT)
+    } catch {
+      return ""
+    }
+  }
+
+  /** Prepend the note to a tool's model-visible text output. */
+  function prependAttachNote(output: string, note: string): string {
+    return note ? `${note}\n\n${output}` : output
   }
 
   async function allNotebooks(): Promise<Notebook[]> {
@@ -200,6 +343,14 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
   }
 
   async function buildDigest(limit = INJECTION_LIMIT): Promise<string> {
+    const hit = digestCache.get(worktree)
+    if (hit && Date.now() - hit.at < CACHE_TTL) return hit.text
+    const text = await computeDigest(limit)
+    digestCache.set(worktree, { at: Date.now(), text })
+    return text
+  }
+
+  async function computeDigest(limit = INJECTION_LIMIT): Promise<string> {
     const nbs = await allNotebooks()
     if (nbs.length === 0) return ""
     let suspect = 0
@@ -235,13 +386,13 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
       if (lines.join("\n").length > limit) break
     }
     lines.push("")
-    lines.push("Hints, not facts — trust the code over the notebook, re-verify suspect/stale entries. Use `notes_get` at task start and `notes_commit` when a task is done. Write every notebook summary in English, even when the conversation is in another language.")
+    lines.push("This notebook memory MUST be read via the `notes_get` tool — never read `.note.yaml` files directly with read/grep (that bypasses tracking and freshness badges). At the start of a task call `notes_get`; when a task is done call `notes_commit`. Write every notebook summary in English, even when the conversation is in another language.")
     return lines.join("\n")
   }
 
   const notesGet = tool({
     description:
-      "Query the project's notebook memory — a per-folder mental model (`.note.yaml`) the agent accumulated in previous tasks: folder summaries, per-file/dir summaries, and cross-file relations. Call at the START of a task, before exploring, to recall what is already known. Two modes: pass `path` to read the ancestor chain for the file/dir you are about to work on (root → leaf, most local knowledge last), or pass `task` to keyword-search all notebooks. Entries carry a freshness badge: ✓ fresh, ⚠ suspect (source changed), ✗ stale (source gone). Hints, not ground truth — trust the code over the notebook.",
+      "Query the project's notebook memory — a per-folder mental model (`.note.yaml`) the agent accumulated in previous tasks: folder summaries, per-file/dir summaries, and cross-file relations. This is the ONLY supported way to read notebook memory — never read `.note.yaml` files directly with read/grep. Call at the START of a task, before exploring, to recall what is already known — AND again mid-task before working on any file/dir you have not consulted this session (a note for the file you just touched is auto-attached to read/edit results on first touch). Two modes: pass `path` to read the ancestor chain for that file/dir (root → leaf, most local knowledge last), or pass `task` to keyword-search all notebooks. It is cheap and local — it returns only the relevant subtree, so use it freely mid-task rather than re-reading code. Entries carry a freshness badge: ✓ fresh, ⚠ suspect (source changed), ✗ stale (source gone). Hints, not ground truth — trust the code over the notebook.",
     args: {
       task: tool.schema.string().optional().describe("A description of what you are about to do; matched against all notebooks."),
       path: tool.schema
@@ -262,6 +413,9 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
         const parts = targetDir === "." ? [] : targetDir.split("/")
         const chain: string[] = []
         for (let i = 0; i <= parts.length; i++) chain.push(parts.slice(0, i).join("/"))
+        // When the target is a directory that carries its own notebook, descend into it
+        // as a leaf so its summary/entries/relations are shown (not just the parent chain).
+        if (byRel.has(target)) chain.push(target)
         const leaf = chain[chain.length - 1]
 
         lines.push(`## Notebook memory · ${target}`)
@@ -269,7 +423,7 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
         for (let i = 0; i < chain.length; i++) {
           const dir = chain[i]
           const nb = byRel.get(dir)
-          if (!nb || (!nb.summary && Object.keys(nb.entries).length === 0)) continue
+          if (!nb || (!nb.summary && Object.keys(nb.entries).length === 0 && nb.relations.length === 0)) continue
           const isLeaf = dir === leaf
           if (i === chain.length - 1) {
             lines.push(`### ${dir || "."}`)
@@ -444,12 +598,145 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
         pushOp(folder, { kind: "removeRelation", from: relTo(from, folder), to: relTo(to, folder) })
       }
 
+      const gate = gateProblems(args)
+      const hasAdded =
+        (args.folder_summaries?.length ?? 0) > 0 || (args.entries?.length ?? 0) > 0 || (args.relations?.length ?? 0) > 0
+      if (hasAdded && evidence.reads.size === 0) {
+        gate.push(
+          "- the session has not read any files in this worktree; read/grep the files you describe first (pure removals are exempt)",
+        )
+      }
+      if (gate.length > 0) {
+        return {
+          title: "notes_commit",
+          output:
+            "notes_commit was NOT applied. Good, English, source-backed summaries were required before saving:\n" +
+            gate.join("\n"),
+        }
+      }
+
       if (opsByFolder.size === 0) {
         return { title: "notes_commit", output: "Nothing to write — provide folder_summaries, entries, relations, or removed." }
       }
 
-      const edits: Array<{ abs: string; label: string; notebook: Notebook; changes: string[] }> = []
+      // Per-note review: one question for each distinct op (folder/entry/
+      // relation/remove), even when several ops land in the same notebook.
+      type ReviewItem = {
+        folder: string
+        op: Op
+        header: string
+        question: string
+        content: string | undefined
+        contentField: "summary" | "description" | undefined
+        remove: boolean
+      }
+      const items: ReviewItem[] = []
       for (const [folder, ops] of opsByFolder) {
+        const folderDisplay = folder || "."
+        for (const op of ops) {
+          if (op.kind === "folder") {
+            items.push({
+              folder,
+              op,
+              header: `folder ${folderDisplay}`,
+              question: `Set the folder summary for ${folderDisplay}. Review or edit the content below:`,
+              content: op.summary,
+              contentField: "summary",
+              remove: false,
+            })
+          } else if (op.kind === "entry") {
+            items.push({
+              folder,
+              op,
+              header: op.name,
+              question: `Set the summary for entry ${op.name} in ${folderDisplay}. Review or edit the content below:`,
+              content: op.summary,
+              contentField: "summary",
+              remove: false,
+            })
+          } else if (op.kind === "relation") {
+            items.push({
+              folder,
+              op,
+              header: `${op.from} → ${op.to}`,
+              question: `Set the description for relation ${op.from} → ${op.to}. Review or edit the content below:`,
+              content: op.description,
+              contentField: "description",
+              remove: false,
+            })
+          } else if (op.kind === "removeEntry") {
+            items.push({
+              folder,
+              op,
+              header: op.name,
+              question: `Remove entry ${op.name} in ${folderDisplay}?`,
+              content: undefined,
+              contentField: undefined,
+              remove: true,
+            })
+          } else if (op.kind === "removeRelation") {
+            items.push({
+              folder,
+              op,
+              header: `${op.from} → ${op.to}`,
+              question: `Remove relation ${op.from} → ${op.to}?`,
+              content: undefined,
+              contentField: undefined,
+              remove: true,
+            })
+          }
+        }
+      }
+
+      const questions = items.map((item) => ({
+        question: item.question,
+        header: item.header,
+        options: item.remove
+          ? [
+              { label: "Confirm & remove", description: "Remove it from the notebook." },
+              { label: "Keep", description: "Leave it as is and move on." },
+            ]
+          : [
+              { label: "Save as proposed", description: "Write this note as shown in the text box below." },
+              { label: "Skip", description: "Skip this note and move on." },
+            ],
+        default: item.content,
+      }))
+
+      let answers: ReadonlyArray<ReadonlyArray<string>>
+      try {
+        answers = await ctx.question({ questions })
+      } catch {
+        return { title: "notes_commit", output: "Review cancelled — no notebooks were written." }
+      }
+
+      const approved = new Map<string, Op[]>()
+      const editedFolders = new Set<string>()
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i]
+        const chosen = answers[i] ?? []
+        if (item.remove) {
+          if (chosen.includes("Keep")) continue
+          const bucket = approved.get(item.folder) ?? []
+          bucket.push(item.op)
+          approved.set(item.folder, bucket)
+          continue
+        }
+        if (chosen.includes("Skip")) continue
+        const edited = chosen[0]?.trim()
+        const applied = edited && !chosen.includes("Save as proposed") ? ({ ...item.op, [item.contentField!]: edited } as Op) : item.op
+        const bucket = approved.get(item.folder) ?? []
+        bucket.push(applied)
+        approved.set(item.folder, bucket)
+        if ((applied as any)[item.contentField!] !== (item as any).content) editedFolders.add(item.folder)
+      }
+
+      if (approved.size === 0) {
+        return { title: "notes_commit", output: "Review skipped — no notebooks were written." }
+      }
+
+      const edits: Array<{ abs: string; label: string; notebook: Notebook; changes: string[]; edited: boolean }> = []
+      for (const [folder, ops] of approved) {
         const resolvedFolder = normalizeRel(folder)
         // Sandbox: drop writes that would land outside the session worktree.
         // The project root ("" or ".") is inside the worktree and is allowed.
@@ -463,8 +750,10 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
           label: `${resolvedFolder || "."}/${NOTEBOOK_NAME}`,
           notebook: { ...result.nb, updated: now },
           changes: result.changes,
+          edited: editedFolders.has(folder),
         })
       }
+      invalidateWorktree()
 
       if (edits.length === 0) {
         return {
@@ -473,31 +762,14 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
         }
       }
 
-      const diffs: string[] = []
-      for (const edit of edits) {
-        const before = await readFile(edit.abs, "utf8").catch(() => "")
-        const after = serializeNotebook(edit.notebook)
-        const diff = unifiedDiff(before, after, edit.label)
-        if (diff) diffs.push(diff)
-      }
-
-      await ctx.ask({
-        permission: "edit",
-        patterns: edits.map((edit) => edit.abs),
-        metadata: { diff: diffs.join("\n"), title: `notes_commit (${args.task})` },
-        always: ["**/.note.yaml"],
-      })
-
-      for (const edit of edits) {
-        await saveNotebook(edit.abs, edit.notebook)
-      }
-      invalidateWorktree()
-
+      for (const edit of edits) await saveNotebook(edit.abs, edit.notebook)
       sessionEvidence(ctx.sessionID).dirty = false
 
       const result: string[] = []
-      for (const edit of edits) result.push(`- ${edit.label}: ${edit.changes.join("; ")}`)
-      return { title: `notes_commit: ${edits.length} notebook${edits.length === 1 ? "" : "s"}`, output: result.join("\n") }
+      for (const edit of edits) {
+        result.push(`- ${edit.label}: ${edit.changes.join("; ")}${edit.edited ? " (content edited during review)" : ""}`)
+      }
+      return { title: `notes_commit: ${result.length} notebook${result.length === 1 ? "" : "s"}`, output: result.join("\n") }
     },
   })
 
@@ -517,27 +789,52 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
     "experimental.chat.system.transform": async (input, output) => {
       const sessionID = input.sessionID
       if (!sessionID) return
-      if (!injected.has(sessionID)) {
-        const digest = await buildDigest().catch(() => "")
-        if (digest) {
-          output.system.push(digest)
-          injected.add(sessionID)
-        }
+      const digest = await buildDigest().catch(() => "")
+      if (digest && injected.get(sessionID) !== digest) {
+        output.system.push(digest)
+        injected.set(sessionID, digest)
       }
       const evidence = sessions.get(sessionID)
-      const nudge = evidence ? nudgeLine(evidence) : undefined
-      if (nudge && evidence) {
-        output.system.push(nudge)
-        evidence.lastRemind = Date.now()
-      }
+      if (!evidence) return
+      const nudge = await commitSuggestion(evidence).catch(() => undefined)
+      if (nudge) output.system.push(nudge)
     },
-    "tool.execute.after": async (input) => {
-      const fileArg = input.args?.filePath ?? input.args?.path
+    "chat.message": async (input, output) => {
+      let textLength = 0
+      for (const part of output.parts) {
+        if (part.type === "text" && typeof part.text === "string") textLength += part.text.length
+      }
+      markUnderstanding(input.sessionID, textLength)
+    },
+    "tool.execute.after": async (input, output) => {
+      const tool = input.tool ?? ""
+      // Attach the relevant per-file notebook note to the tool output the first
+      // time the agent works on a file, so leaf memory reaches the model mid-task.
+      if (ATTACH_TOOLS.has(tool)) {
+        const rel = attachFileRel(input.args)
+        if (rel && typeof output.output === "string") {
+          const evidence = sessionEvidence(input.sessionID)
+          if (!evidence.reads.has(path.resolve(worktree, rel))) {
+            const note = await buildAttachNote(rel)
+            output.output = prependAttachNote(output.output, note)
+          }
+        }
+      }
+      const fileArg = input.args?.filePath
       if (typeof fileArg === "string" && fileArg.trim()) {
         recordExploration(input.sessionID, fileArg)
         return
       }
-      if (input.tool === "apply_patch") {
+      // Only treat a bare `path` arg as exploration for tools that genuinely index
+      // the filesystem; generic `path` args (e.g. notes_get) are not file reads.
+      if (tool === "grep" || tool === "glob") {
+        const areaArg = input.args?.path ?? input.args?.pattern
+        if (typeof areaArg === "string" && areaArg.trim()) {
+          recordArea(input.sessionID, areaArg)
+          return
+        }
+      }
+      if (tool === "apply_patch") {
         const files = input.args?.files
         if (Array.isArray(files)) {
           for (const file of files) {
