@@ -344,6 +344,31 @@ describe("notes plugin (tree memory)", () => {
     expect(result.output).toContain("vague")
   })
 
+  test("falls back to a textual review when ctx.question is missing (no silent cancel)", async () => {
+    const hooks = await plugin()
+    const commit = hooks.tool!["notes_commit"]
+    const after = hooks["tool.execute.after"]!
+    await markExplored(after, "s9", "src/auth/password-reset.ts")
+
+    const result = await (commit.execute as any)(
+      {
+        task: "no-modal",
+        entries: [
+          {
+            path: "src/auth/password-reset.ts",
+            summary: "resetPassword() rotates credentials; SessionStore.invalidate_user() clears stale sessions.",
+            based_on: ["src/auth/password-reset.ts"],
+          },
+        ],
+      },
+      context({ sessionID: "s9", question: undefined as any }),
+    )
+    expect(result.output).not.toContain("Review cancelled")
+    expect(result.output).toContain("ctx.question")
+    const text = await Bun.file(`${TMP}/src/auth/.note.yaml`).text()
+    expect(text).toContain("resetPassword() rotates credentials")
+  })
+
   test("marks a session dirty on substantive Q&A (turn-aware), not only file reads", async () => {
     const hooks = await plugin()
     const msg = hooks["chat.message"]!

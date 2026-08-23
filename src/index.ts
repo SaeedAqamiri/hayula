@@ -386,7 +386,7 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
       if (lines.join("\n").length > limit) break
     }
     lines.push("")
-    lines.push("This notebook memory MUST be read via the `notes_get` tool — never read `.note.yaml` files directly with read/grep (that bypasses tracking and freshness badges). At the start of a task call `notes_get`; when a task is done call `notes_commit`. Write every notebook summary in English, even when the conversation is in another language.")
+    lines.push("This digest only SAMPLES each folder's memory (up to 2 entries) — call `notes_get` (a task or the target path) to load the full per-file memory; never read `.note.yaml` files directly with read/grep, which bypasses tracking and freshness badges. At the START of a task — and before answering any general question about this project (what it is, how to run it, its progress, what is left) — call `notes_get` first: it is cheap and local, so prefer it to re-reading code you have already mapped. When a task is done call `notes_commit`. Write every notebook summary in English, even when the conversation is in another language.")
     return lines.join("\n")
   }
 
@@ -703,36 +703,49 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
         default: item.content,
       }))
 
-      let answers: ReadonlyArray<ReadonlyArray<string>>
-      try {
-        answers = await ctx.question({ questions })
-      } catch {
-        return { title: "notes_commit", output: "Review cancelled — no notebooks were written." }
-      }
-
       const approved = new Map<string, Op[]>()
       const editedFolders = new Set<string>()
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i]
-        const chosen = answers[i] ?? []
-        if (item.remove) {
-          if (chosen.includes("Keep")) continue
+      let textualFallback = false
+      const questionFn = (ctx as { question?: (input: { questions: unknown }) => Promise<ReadonlyArray<ReadonlyArray<string>>> })
+        .question
+      if (typeof questionFn === "function") {
+        let answers: ReadonlyArray<ReadonlyArray<string>>
+        try {
+          answers = await questionFn({ questions })
+        } catch {
+          return { title: "notes_commit", output: "Review cancelled — no notebooks were written." }
+        }
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i]
+          const chosen = answers[i] ?? []
+          if (item.remove) {
+            if (chosen.includes("Keep")) continue
+            const bucket = approved.get(item.folder) ?? []
+            bucket.push(item.op)
+            approved.set(item.folder, bucket)
+            continue
+          }
+          if (chosen.includes("Skip")) continue
+          const edited = chosen[0]?.trim()
+          const applied = edited && !chosen.includes("Save as proposed") ? ({ ...item.op, [item.contentField!]: edited } as Op) : item.op
+          const bucket = approved.get(item.folder) ?? []
+          bucket.push(applied)
+          approved.set(item.folder, bucket)
+          if ((applied as any)[item.contentField!] !== (item as any).content) editedFolders.add(item.folder)
+        }
+        if (approved.size === 0) {
+          return { title: "notes_commit", output: "Review skipped — no notebooks were written." }
+        }
+      } else {
+        // No interactive review modal on this host (ctx.question is missing, e.g. a stock
+        // opencode build without the newer SDK method). Fall back to a textual review: write
+        // everything exactly as proposed so nothing is silently lost, and report the diff.
+        textualFallback = true
+        for (const item of items) {
           const bucket = approved.get(item.folder) ?? []
           bucket.push(item.op)
           approved.set(item.folder, bucket)
-          continue
         }
-        if (chosen.includes("Skip")) continue
-        const edited = chosen[0]?.trim()
-        const applied = edited && !chosen.includes("Save as proposed") ? ({ ...item.op, [item.contentField!]: edited } as Op) : item.op
-        const bucket = approved.get(item.folder) ?? []
-        bucket.push(applied)
-        approved.set(item.folder, bucket)
-        if ((applied as any)[item.contentField!] !== (item as any).content) editedFolders.add(item.folder)
-      }
-
-      if (approved.size === 0) {
-        return { title: "notes_commit", output: "Review skipped — no notebooks were written." }
       }
 
       const edits: Array<{ abs: string; label: string; notebook: Notebook; changes: string[]; edited: boolean }> = []
@@ -766,6 +779,11 @@ export const NotesPlugin: Plugin = async ({ worktree }) => {
       sessionEvidence(ctx.sessionID).dirty = false
 
       const result: string[] = []
+      if (textualFallback) {
+        result.push(
+          "Interactive review (ctx.question) is unavailable on this host, so everything was saved exactly as proposed. Review the changes below and delete any you reject.",
+        )
+      }
       for (const edit of edits) {
         result.push(`- ${edit.label}: ${edit.changes.join("; ")}${edit.edited ? " (content edited during review)" : ""}`)
       }
