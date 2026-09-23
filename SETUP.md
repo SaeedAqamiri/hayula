@@ -133,6 +133,73 @@ cd ~/hayula/opencode && bun dev
 - بعد از چند تسک، فایل `.note.yaml` کنار پروژه ساخته شود → notes-plugin فعال است
 - `bun run typecheck` از ریشه opencode برای اطمینان از سلامت بیلد
 
+## ۷. سیستم صوتی (whisper + voice-control)
+
+زنجیره صدا: دکمه‌های opencode → پل `voice-control` (پورت ۸۱۷۹) → `whisper-server` (پورت ۸۱۷۸، مدل large-v3-turbo، زبان fa).
+
+فایل‌های آماده در پوشه `voice/` همین ریپو هستند: اسکریپت `voice-control` و دو یونیت systemd.
+
+### ۷.۱. whisper.cpp — بیلد و مدل
+
+```bash
+git clone https://github.com/ggml-org/whisper.cpp ~/opt/whisper.cpp
+cd ~/opt/whisper.cpp
+cmake -B build && cmake --build build --target whisper-server -j
+```
+
+مدل (۵۴۸MB) — یکی از دو راه:
+
+```bash
+# راه ۱: انتقال از سیستم قدیم (از ایران مطمئن‌تر)
+mkdir -p ~/.local/share/whisper-cpp
+scp سیستم-قدیم:.local/share/whisper-cpp/ggml-large-v3-turbo-q5_0.bin  ~/.local/share/whisper-cpp/
+
+# راه ۲: دانلود مستقیم (نیازمند دسترسی به HuggingFace)
+cd ~/opt/whisper.cpp && bash models/download-ggml-model.sh large-v3-turbo-q5_0
+mkdir -p ~/.local/share/whisper-cpp
+cp models/ggml-large-v3-turbo-q5_0.bin ~/.local/share/whisper-cpp/
+```
+
+> ⚠️ مسیر مدل در یونیت systemd هاردکد است: `~/.local/share/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`
+
+### ۷.۲. نصب پل و سرویس‌ها
+
+```bash
+sudo apt install sox            # voice-control برای ساخت wav پروب به sox نیاز دارد
+
+cd ~/hayula/voice
+cp voice-control ~/.local/bin/voice-control && chmod +x ~/.local/bin/voice-control
+cp whisper-server.service voice-control.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+```
+
+اگر یوزر سیستم جدید `saeed` نیست، داخل هر دو فایل `.service` مسیرهای `/home/saeed/...` را اصلاح کن.
+
+### ۷.۳. کلید پروایدر صوتی
+
+پلاگین صوتی از `apiKeyEnv: ZAI_API_KEY` می‌خواند — در `~/.bashrc`:
+
+```bash
+export ZAI_API_KEY="<کلید Z.AI — همان opencode.jsonc>"
+```
+
+### ۷.۴. فعال‌سازی
+
+```bash
+systemctl --user enable --now voice-control   # پل ۸۱۷۹ — همیشه روشن (سبک است)
+systemctl --user enable --now whisper-server  # STT ۸۱۷۸ — فقط وقتی صدا می‌خواهی (~۲GB رم)
+```
+
+دکمه «whisper toggle» در opencode همین سرویس را خاموش/روشن می‌کند؛ لازم نیست دائمی بماند.
+
+### ۷.۵. تأیید صدا
+
+```bash
+curl -s http://127.0.0.1:8179/status            # باید {"state":"..."} بدهد
+curl -s -X POST http://127.0.0.1:8179/up        # روشن‌کردن whisper و انتظار تا آماده شود
+# حالا در opencode دکمه ضبط را بزن و فارسی حرف بزن
+```
+
 ## نکات نگهداری
 
 - opencode و opencti روی گیت‌هاب **نسخه سبک**‌اند (اسنپ‌شات upstream + کامیت‌های خودم)؛ تاریخچه کامل upstream عمداً پوش نشده است.
