@@ -1,0 +1,21 @@
+{
+  "name": "notes-plugin",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenCode plugin: per-folder notebook memory that accumulates what the agent learns task by task.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.18.16",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}
