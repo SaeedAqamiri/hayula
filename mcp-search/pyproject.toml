@@ -1,0 +1,12 @@
+[project]
+name = "mcp-search"
+version = "0.1.0"
+description = "Free web search MCP server (no API key), using engines reachable from restricted networks."
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.0,<2",
+  "ddgs",
+]
+
+[tool.uv]
+package = false
