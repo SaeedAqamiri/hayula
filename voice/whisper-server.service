@@ -3,11 +3,12 @@ Description=Whisper.cpp STT server (large-v3-turbo) for opencode-voice
 Documentation=https://github.com/ggml-org/whisper.cpp
 
 [Service]
-ExecStart=/home/saeed/opt/whisper.cpp/build/bin/whisper-server \
-  -m /home/saeed/.local/share/whisper-cpp/ggml-large-v3-turbo-q5_0.bin \
+ExecStart=%h/opt/whisper.cpp/build/bin/whisper-server \
+  -m %h/.local/share/whisper-cpp/ggml-large-v3-turbo.bin \
   --host 127.0.0.1 --port 8178 \
   --inference-path /audio/transcriptions \
-  -l fa -t 8
+  -l fa -t 8 \
+  --vad -vm %h/.local/share/whisper-cpp/for-tests-silero-v6.2.0-ggml.bin
 Restart=on-failure
 RestartSec=2
 

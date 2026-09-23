@@ -1,0 +1,10 @@
+[Unit]
+Description=Fix internal mic gain (60dB saturation causes DC offset/clipping)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/amixer -c PCH set 'Internal Mic Boost' 0 0
+ExecStart=/usr/bin/amixer -c PCH set 'Capture' 46 46
+
+[Install]
+WantedBy=default.target

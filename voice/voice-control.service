@@ -2,7 +2,7 @@
 Description=Voice control HTTP bridge for opencode voice buttons (port 8179)
 
 [Service]
-ExecStart=/usr/bin/python3 /home/saeed/.local/bin/voice-control
+ExecStart=/usr/bin/python3 %h/.local/bin/voice-control
 Restart=on-failure
 RestartSec=2
 

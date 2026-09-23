@@ -131,32 +131,36 @@ cd ~/hayula/opencode && bun dev
 
 ## ۷. سیستم صوتی (whisper + voice-control)
 
-زنجیره صدا: دکمه‌های opencode → پل `voice-control` (پورت ۸۱۷۹) → `whisper-server` (پورت ۸۱۷۸، مدل large-v3-turbo، زبان fa).
+زنجیره صدا: دکمه‌های opencode → پل `voice-control` (پورت ۸۱۷۹) → `whisper-server` (پورت ۸۱۷۸، مدل large-v3-turbo، زبان fa، **روی GPU**).
 
-فایل‌های آماده در پوشه `voice/` همین ریپو هستند: اسکریپت `voice-control` و دو یونیت systemd.
+فایل‌های آماده در پوشه `voice/` همین ریپو هستند: اسکریپت `voice-control` و سه یونیت systemd — مسیرها با `%h` و `expanduser` قابل‌حمل‌اند و مستقل از نام یوزر.
 
-### ۷.۱. whisper.cpp — بیلد و مدل
+### ۷.۱. whisper.cpp — بیلد CUDA و مدل
+
+بیلد GPU بدون sudo — nvcc کامل از conda-forge (ویل‌های pip مثل `nvidia-cuda-nvcc-cu12` فقط `ptxas` دارند و برای بیلد به درد نمی‌خورند؛ micromamba از GitHub releases):
 
 ```bash
 git clone https://github.com/ggml-org/whisper.cpp ~/opt/whisper.cpp
+micromamba create -y -p ~/opt/cuda-env -c conda-forge \
+  "cuda-nvcc=12.6" "cuda-cudart-dev=12.6" "cuda-cccl=12.6" "libcublas-dev=12.6"
 cd ~/opt/whisper.cpp
-cmake -B build && cmake --build build --target whisper-server -j
+CUDACXX=~/opt/cuda-env/bin/nvcc cmake -B build -DGGML_CUDA=1 \
+  -DCMAKE_CUDA_ARCHITECTURES=native -DCUDAToolkit_ROOT=~/opt/cuda-env -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target whisper-server whisper-cli -j
 ```
 
-مدل (۵۴۸MB) — یکی از دو راه:
+مدل f16 (~۱.۶GB؛ بدون کوانتیزه — با ۸GB VRAM جا می‌شود). تبدیل از نسخه HF (transformers) با اسکریپت خود whisper.cpp که به `mel_filters.npz` ریپوی openai/whisper نیاز دارد؛ پایتون باید torch و transformers داشته باشد:
 
 ```bash
-# راه ۱: انتقال از سیستم قدیم (از ایران مطمئن‌تر)
-mkdir -p ~/.local/share/whisper-cpp
-scp سیستم-قدیم:.local/share/whisper-cpp/ggml-large-v3-turbo-q5_0.bin  ~/.local/share/whisper-cpp/
-
-# راه ۲: دانلود مستقیم (نیازمند دسترسی به HuggingFace)
-cd ~/opt/whisper.cpp && bash models/download-ggml-model.sh large-v3-turbo-q5_0
-mkdir -p ~/.local/share/whisper-cpp
-cp models/ggml-large-v3-turbo-q5_0.bin ~/.local/share/whisper-cpp/
+git clone --depth 1 https://github.com/openai/whisper ~/opt/whisper
+mkdir -p ~/.local/share/whisper-cpp /tmp/ggml-out
+<path-python-with-torch> ~/opt/whisper.cpp/models/convert-h5-to-ggml.py \
+  ~/models/whisper-large-v3-turbo ~/opt/whisper /tmp/ggml-out
+mv /tmp/ggml-out/ggml-model.bin ~/.local/share/whisper-cpp/ggml-large-v3-turbo.bin
+cp ~/opt/whisper.cpp/models/for-tests-silero-v6.2.0-ggml.bin ~/.local/share/whisper-cpp/   # مدل VAD
 ```
 
-> ⚠️ مسیر مدل در یونیت systemd هاردکد است: `~/.local/share/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`
+VAD (silero) در یونیت `whisper-server` فعاله — بدون آن روی سکوت هذیون می‌سازد (مثلاً «PYM JBZ») به‌جای متن خالی.
 
 ### ۷.۲. نصب پل و سرویس‌ها
 
@@ -165,11 +169,13 @@ sudo apt install sox            # voice-control برای ساخت wav پروب �
 
 cd ~/hayula/voice
 cp voice-control ~/.local/bin/voice-control && chmod +x ~/.local/bin/voice-control
-cp whisper-server.service voice-control.service ~/.config/systemd/user/
+cp whisper-server.service voice-control.service mic-fix.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 ```
 
-اگر یوزر سیستم جدید `saeed` نیست، داخل هر دو فایل `.service` مسیرهای `/home/saeed/...` را اصلاح کن.
+### ۷.۲.۱. گین میکروفون (mic-fix)
+
+اگر `Internal Mic Boost` و `Capture` همزمان ماکزیمم باشند (~۶۰dB مجموع)، بایاس میکروفون ADC را اشباع می‌کند: ضبط آفست DC بزرگ می‌گیرد، کلیپ می‌شود و whisper رویش هذیون می‌گوید. یونیت `mic-fix.service` موقع هر لاگین boost را صفر و capture را ~۱۷dB می‌کند (در تست، DC از ۰.۶۵- به ۰.۰۲ رسید). اگر کارت صدای سیستم متفاوت است، `-c PCH` داخل یونیت را با `cat /proc/asound/cards` اصلاح کن. تشخیص: `arecord -d 3` بعد `sox x.wav -n stats` — DC باید حدود صفر باشد.
 
 ### ۷.۳. کلید پروایدر صوتی
 
@@ -183,16 +189,25 @@ export ZAI_API_KEY="<کلید Z.AI — همان opencode.jsonc>"
 
 ```bash
 systemctl --user enable --now voice-control   # پل ۸۱۷۹ — همیشه روشن (سبک است)
-systemctl --user enable --now whisper-server  # STT ۸۱۷۸ — فقط وقتی صدا می‌خواهی (~۲GB رم)
+systemctl --user enable --now whisper-server  # STT ۸۱۷۸ روی GPU (~۱.۹GB VRAM) — toggle دارد
+systemctl --user enable --now mic-fix         # گین میکروفون — هر لاگین اجرا می‌شود
 ```
 
-دکمه «whisper toggle» در opencode همین سرویس را خاموش/روشن می‌کند؛ لازم نیست دائمی بماند.
+دکمه «whisper toggle» در opencode همین سرویس را خاموش/روشن می‌کند؛ لازم نیست دائمی بماند. دکمه ضبط هم اگر whisper خاموش باشد، خودش از طریق پل روشنش می‌کند.
 
 ### ۷.۵. تأیید صدا
 
 ```bash
 curl -s http://127.0.0.1:8179/status            # باید {"state":"..."} بدهد
 curl -s -X POST http://127.0.0.1:8179/up        # روشن‌کردن whisper و انتظار تا آماده شود
+
+# تست سکوت — باید متن خالی بدهد، نه هذیون:
+sox -n -r 16000 -c 1 /tmp/silence.wav trim 0 2
+curl -s http://127.0.0.1:8178/audio/transcriptions -F file=@/tmp/silence.wav -F "response_format=json"
+
+# تست میکروفون — DC باید حدود صفر باشد:
+arecord -D pulse -f S16_LE -r 16000 -c 1 -d 3 /tmp/m.wav && sox /tmp/m.wav -n stats | grep -E "DC|RMS"
+
 # حالا در opencode دکمه ضبط را بزن و فارسی حرف بزن
 ```
 

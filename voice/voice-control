@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SERVICE = "whisper-server"
 WHISPER = "http://127.0.0.1:8178/audio/transcriptions"
-PROBE = "/home/saeed/.cache/voice-probe.wav"
+PROBE = os.path.expanduser("~/.cache/voice-probe.wav")
 
 
 def systemctl(*args):
