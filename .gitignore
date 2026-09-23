@@ -1,7 +1,5 @@
 # Notebook memory files written by the native notes plugin
 **/.note.yaml
 
-# Independent sub-repositories (each has its own history)
-/agentic-ai-course/
-/notes-plugin/
+# opencode stays an independent fork repo (own upstream history)
 /opencode/
