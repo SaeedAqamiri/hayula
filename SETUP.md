@@ -6,10 +6,8 @@
 
 | ریپو | شاخه اصلی | کاربرد |
 |---|---|---|
-| `opencode` | `notebook-memory` | فورک opencode با حافظه notebook (نسخه سبک: اسنپ‌شات upstream + کامیت‌های خودم) |
-| `notes-plugin` | `master` | پلاگین V1 حافظه دفترچه (.note.yaml) برای opencode |
-| `mcp-search` | `main` | سرور MCP جستجوی وب رایگان برای شبکه‌های محدود (بدون API key) |
-| `agentic-ai-course` | `master` | درسنامه ساخت ایجنت |
+| `hayula` | `master` | **این ریپو** — SETUP.md، voice/، notes-plugin، mcp-search و درسنامه (همه subtree) |
+| `opencode` | `notebook-memory` | فورک opencode با حافظه notebook (نسخه سبک: اسنپ‌شات upstream + کامیت‌های خودم) — ریپوی جدا |
 | `legal-agent` | `master` | ایجنت حقوقی (RAG روی مقررات ایران) |
 | `opencti` | `ai-ungate` | فورک OpenCTI — حالت AI محلی (نسخه سبک) |
 | `opencti-agent` | `main` | ایجنت روی OpenCTI با گیت HITL |
@@ -25,16 +23,14 @@ ssh-keygen -t ed25519                             # کلید جدید و اضا�
 
 ## ۱. کلون — مسیرها عینی مهم‌اند
 
-کانفیگ opencode به مسیرهای `/home/saeed/...` اشاره می‌کند؛ یا همین مسیرها را بساز، یا مسیرهای کانفیگ را ویرایش کن.
+همه‌چیز جز opencode داخل همین ریپو (hayula) است؛ فقط opencode جدا کلون می‌شود.
 
 ```bash
-mkdir -p ~/hayula
-git clone git@github.com:SaeedAqamiri/opencode.git     ~/hayula/opencode
-git clone git@github.com:SaeedAqamiri/notes-plugin.git ~/hayula/notes-plugin
-git clone git@github.com:SaeedAqamiri/agentic-ai-course.git ~/hayula/agentic-ai-course
-git clone git@github.com:SaeedAqamiri/mcp-search.git   ~/mcp-search
+git clone git@github.com:SaeedAqamiri/hayula.git  ~/hayula   # SETUP.md + voice/ + notes-plugin + mcp-search + درسنامه
+cd ~/hayula
+git clone git@github.com:SaeedAqamiri/opencode.git opencode  # در ~/hayula/opencode (gitignored در hayula)
 
-cd ~/hayula/opencode
+cd opencode
 git checkout notebook-memory
 git remote add fork git@github.com:SaeedAqamiri/opencode.git   # ریموت پوش‌های بعدی (origin = upstream می‌ماند)
 ```
@@ -50,7 +46,7 @@ bun dev         # اجرای TUI/CLI — همان opencode روزمره
 ## ۳. mcp-search
 
 ```bash
-cd ~/mcp-search
+cd ~/hayula/mcp-search
 uv sync         # .venv را از uv.lock می‌سازد
 ```
 
@@ -60,7 +56,7 @@ uv sync         # .venv را از uv.lock می‌سازد
 "mcp": {
   "web-search": {
     "type": "local",
-    "command": ["/home/saeed/mcp-search/.venv/bin/python", "/home/saeed/mcp-search/server.py"],
+    "command": ["/home/saeed/hayula/mcp-search/.venv/bin/python", "/home/saeed/hayula/mcp-search/server.py"],
     "timeout": 60000
   }
 }
@@ -202,6 +198,7 @@ curl -s -X POST http://127.0.0.1:8179/up        # روشن‌کردن whisper و
 
 ## نکات نگهداری
 
+- **notes-plugin، mcp-search و درسنامه** به‌صورت subtree داخل همین ریپو هستند — توسعه‌شان درجا انجام می‌شود و با hayula پوش می‌شوند. ریپوهای قدیمی‌شان روی گیت‌هاب (`SaeedAqamiri/notes-plugin`، `mcp-search`، `agentic-ai-course`) فقط **آرشیو منجمد**اند و آپدیت نمی‌شوند.
 - opencode و opencti روی گیت‌هاب **نسخه سبک**‌اند (اسنپ‌شات upstream + کامیت‌های خودم)؛ تاریخچه کامل upstream عمداً پوش نشده است.
 - برای به‌روزرسانی از upstream: `git fetch origin` در ریپوی opencode/opencti محلی، سپس rebase و `git push fork`.
 - فایل‌های `.note.yaml` حافظه محلی‌اند و بین سیستم‌ها منتقل نمی‌شوند (طراحی بی‌خیال).
