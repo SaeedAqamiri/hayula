@@ -114,6 +114,10 @@ const STOP = new Set([
 // ---------- filesystem ----------
 
 export async function listNotebooks(worktree: string): Promise<string[]> {
+  // A filesystem-root worktree (the opencode global-project fallback for
+  // non-git directories) would make this recursive walk scan the entire
+  // filesystem. Refuse to descend into a volume root.
+  if (worktree === "/" || path.parse(worktree).root === worktree) return []
   const found: string[] = []
   const walk = async (dir: string) => {
     let entries
